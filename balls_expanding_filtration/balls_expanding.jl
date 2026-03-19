@@ -139,6 +139,9 @@ function select_topk_intervals(intervals, k::Union{Int,Nothing}, tmax::Float64)
     return intervals[idx[1:k]]
 end
 
+
+
+
 function make_filtration_plus_barcode_gif(points, result;
         rmax::Float64,
         nframes::Int=80,
@@ -148,30 +151,36 @@ function make_filtration_plus_barcode_gif(points, result;
         max_triangles::Int=2000,
         ball_alpha::Float64=0.25,
         tri_alpha::Float64=0.15,
-        topk0::Union{Int,Nothing}=nothing,  # ←追加：H0表示本数
-        topk1::Union{Int,Nothing}=nothing   # ←追加：H1表示本数
+        topk0::Union{Int,Nothing}=nothing,
+        topk1::Union{Int,Nothing}=nothing
     )
 
     x = first.(points); y = last.(points)
 
+    # --- バーコード用区間（r軸に変換：t/2）---
     ints0_all = intervals_from(result[1])
     ints1_all = intervals_from(result[2])
-    # 追加：t(距離閾値) -> r(半径) へ変換
-     ints0_all = [(b/2, d/2) for (b, d) in ints0_all]   # d が Inf でも Inf/2 = Inf でOK
-     ints1_all = [(b/2, d/2) for (b, d) in ints1_all]
+    ints0_all = [(b/2, d/2) for (b, d) in ints0_all]
+    ints1_all = [(b/2, d/2) for (b, d) in ints1_all]
 
+    # --- PD表示用（r軸で表示したいので、こちらも t/2 に変換した“図”を作る）---
+    # ここは「点の散布図」で描くのが確実（Ripsererのplot結果を直接いじらない）
+    dgm0 = ints0_all
+    dgm1 = ints1_all
+
+    # 表示範囲（データ）
     xmin, xmax = minimum(x), maximum(x)
     ymin, ymax = minimum(y), maximum(y)
     pad = 0.1 * max(xmax - xmin, ymax - ymin)
     xlims = (xmin - pad - rmax, xmax + pad + rmax)
     ylims = (ymin - pad - rmax, ymax + pad + rmax)
 
+    # バーコード・PD横軸は r
     tmax = rmax
 
-    # 間引き（上位k本）
+    # 間引き
     ints0 = select_topk_intervals(ints0_all, topk0, tmax)
     ints1 = select_topk_intervals(ints1_all, topk1, tmax)
-
 
     n0 = length(ints0)
     n1 = length(ints1)
@@ -183,16 +192,33 @@ function make_filtration_plus_barcode_gif(points, result;
         title_suffix = "($s0, $s1)"
     end
 
+    # PDの表示範囲（r軸なので [0, rmax] あたりに合わせる）
+    pd_xlim = (0, tmax)
+    pd_ylim = (0, tmax)
+
+
+    # --- 右上：静的な Persistence diagram（r軸） ---
+    p_pd_static = plot(
+        xlims=(0, tmax), ylims=(0, tmax),
+        aspect_ratio=1,
+        xlabel="birth (r)", ylabel="death (r)",
+        legend=false,
+        title="Persistence diagram (H0 black, H1 red)"
+    )
+
+scatter!(p_pd_static, first.(dgm0), last.(dgm0); ms=3,msw=0, c=:black)
+scatter!(p_pd_static, first.(dgm1), last.(dgm1); ms=3,msw=0, c=:red)
+plot!(p_pd_static, [0, tmax], [0, tmax]; lc=:gray, lw=1, alpha=0.6, label=false)
+
     anim = @animate for r in range(0, rmax; length=nframes)
         t = r
 
-        # --- 上段 ---
+        # --- 左：ボール膨張 ---
         p1 = plot(aspect_ratio=1, xlims=xlims, ylims=ylims, legend=false)
         scatter!(p1, x, y; ms=2)
 
         for (xi, yi) in zip(x, y)
-            plot!(p1, circle(xi, yi, r);
-                  fc=:blue, fa=ball_alpha, lc=:blue, lw=0, label=false)
+            plot!(p1, circle(xi, yi, r); fc=:blue, fa=ball_alpha, lc=:blue, lw=0, label=false)
         end
 
         for (i, j) in cech_edges(points, r)
@@ -201,35 +227,52 @@ function make_filtration_plus_barcode_gif(points, result;
 
         if draw_triangles
             tris = rips_triangles(points, 2r; max_triangles=max_triangles)
-            #tris = cech_triangles(points, r; max_triangles=max_triangles)
-            # 三角形を“奥”にしたいなら、ここを辺描画より前に移動してください
             for (i, j, k) in tris
                 poly = Shape([x[i], x[j], x[k]], [y[i], y[j], y[k]])
                 plot!(p1, poly; lw=0, lc=:red, fillcolor=:red, fillalpha=tri_alpha, label=false)
             end
         end
 
+        # 表示位置
         annotate!(p1,
-            xlims[1] - 0.55*(xlims[2]-xlims[1]),
-            ylims[2] - 0.05*(ylims[2]-ylims[1]),
+            xlims[1] - 0.25*(xlims[2]-xlims[1]),
+            ylims[2] - 0*(ylims[2]-ylims[1]),
             text("r = $(round(r, digits=4))", 15)
         )
 
-        # --- 下段 ---
+        p_pd = deepcopy(p_pd_static)   # 安全のため（毎フレーム描画状態が汚れない）
 
+        # H0: black, H1: red
+        scatter!(p_pd, first.(dgm0), last.(dgm0); ms=2, c=:black)
+        scatter!(p_pd, first.(dgm1), last.(dgm1); ms=2, c=:red)
+
+        # 対角線
+        plot!(p_pd, [0, tmax], [0, tmax]; lc=:gray, lw=1, alpha=0.6, label=false)
+
+        # --- 下：バーコード ---
         gap = 3
         offset = n0 + gap
-        # y 範囲も gap を反映
         p2 = plot(xlims=(0, tmax), ylims=(-1, n0 + n1 + gap + 2),
                   legend=false, yticks=false, xlabel="r",
-                  title = "Barcodes  (H0:black, H1:red), Rips $title_suffix")
+                  title="Barcodes (H0:black, H1:red), Rips $title_suffix")
+        p2 = plot(
+    xlims=(0, tmax), ylims=(-1, n0 + n1 + gap + 2),
+    legend=false, yticks=false, xlabel="r",
+    title="Barcodes  (H0:black, H1:red), Rips $title_suffix",
+    left_margin=12Plots.mm,
+    right_margin=12Plots.mm
+)
+
         plot_growing_barcode!(p2, ints0, t; y0=0,      dy=1.0, lc=:black, lw=3)
         plot_growing_barcode!(p2, ints1, t; y0=offset, dy=1.0, lc=:red,   lw=3)
-        plot(p1, p2; layout=grid(2,1, heights=[0.65, 0.35]))
+
+        # --- 合成：上段(左=データ, 右=PD)、下段(バーコードを横幅いっぱい) ---
+        plot(p1,  p_pd, p2;
+     layout = @layout([a b; c ]),
+     size   = (1200, 700))
     end
 
     gif(anim, outpath; fps=fps)
     return outpath
 end
-
 
